@@ -13,6 +13,7 @@ from ulauncher.api.shared.action.DoNothingAction import DoNothingAction
 
 logger = logging.getLogger(__name__)
 
+# Persistent storage file location path
 GROUPS_FILE = Path("~/.config/ulauncher/collections_storage.json").expanduser()
 DEFAULT_ICON = "images/icon.png" 
 
@@ -49,7 +50,7 @@ class KeywordQueryEventListener(EventListener):
         raw_args = argument.strip()
 
         # -----------------------------------------------------------------
-        # Intercept Internal State Hooks
+        # SECTION 1: Intercept Internal State Hooks (Writes Data to JSON)
         # -----------------------------------------------------------------
         if raw_args.startswith("commit_action "):
             payload = raw_args[14:].strip()
@@ -58,43 +59,75 @@ class KeywordQueryEventListener(EventListener):
                 target_group, action_type = bits[0], bits[1]
                 remaining_data = bits[2] if len(bits) == 3 else ""
                 
+                # Handling addition mutations
                 if action_type == "add":
                     if target_group not in groups:
                         groups[target_group] = []
-                    # Only add if data is provided; allows creating empty groups too
-                    if remaining_data and remaining_data not in groups[target_group]:
-                        groups[target_group].append(remaining_data)
+                    
+                    if remaining_data:
+                        if ":" in remaining_data:
+                            alias_part, cmd_part = [x.strip() for x in remaining_data.split(":", 1)]
+                        else:
+                            alias_part, cmd_part = remaining_data, remaining_data
+                        
+                        entry = {"alias": alias_part, "command": cmd_part}
+                        
+                        # Remove existing duplicate alias names to allow rewrites
+                        groups[target_group] = [e for e in groups[target_group] if (isinstance(e, dict) and e["alias"] != alias_part) or (isinstance(e, str) and e != alias_part)]
+                        groups[target_group].append(entry)
                     save_groups(groups)
                 
+                # Handling deletion mutations
                 elif action_type == "delete" and remaining_data:
-                    if target_group in groups and remaining_data in groups[target_group]:
-                        groups[target_group].remove(remaining_data)
+                    if target_group in groups:
+                        groups[target_group] = [e for e in groups[target_group] if (isinstance(e, dict) and e["alias"] != remaining_data) and (isinstance(e, str) and e != remaining_data)]
                     save_groups(groups)
 
+                # Handling inline edits and updates
                 elif action_type == "update":
                     if "->" in remaining_data:
-                        old_cmd, new_cmd = [x.strip() for x in remaining_data.split("->", 1)]
-                        if target_group in groups and old_cmd in groups[target_group]:
-                            idx = groups[target_group].index(old_cmd)
-                            groups[target_group][idx] = new_cmd
+                        old_alias, new_payload = [x.strip() for x in remaining_data.split("->", 1)]
+                        if target_group in groups:
+                            for entry in groups[target_group]:
+                                # If legacy format data, upgrade it on the fly
+                                current_alias = entry["alias"] if isinstance(entry, dict) else entry
+                                
+                                if current_alias == old_alias:
+                                    # Case: gp group1 DemoAlias -> Demo : echo "new Command"
+                                    if ":" in new_payload:
+                                        a_part, c_part = [x.strip() for x in new_payload.split(":", 1)]
+                                        if isinstance(entry, dict):
+                                            entry["alias"] = a_part
+                                            entry["command"] = c_part
+                                    else:
+                                        # Case: Just renaming alias only, preserving original command
+                                        if isinstance(entry, dict):
+                                            entry["alias"] = new_payload
+                                        else:
+                                            # If old item was string format, duplicate it to both parameters
+                                            groups[target_group].remove(entry)
+                                            groups[target_group].append({"alias": new_payload, "command": entry})
+                                    break
                             save_groups(groups)
 
                 return RenderResultListAction([
                     ExtensionResultItem(
                         icon=DEFAULT_ICON,
                         name="✨ Operation Complete!",
-                        description="Press Enter to open your collection.",
+                        description="Press Enter to open your collection view.",
                         on_enter=SetUserQueryAction(f"{keyword} {target_group}")
                     )
                 ])
 
-        # 1. Base State: Typing just "gp" or filtering existing groups
+        # -----------------------------------------------------------------
+        # SECTION 2: Parsing Main View Interfaces
+        # -----------------------------------------------------------------
         bits = raw_args.split(maxsplit=1)
         group_name = bits[0] if raw_args else ""
         sub_query = bits[1].strip() if len(bits) > 1 else ""
 
+        # Root State UI Interface: User types "gp" or filters collection names
         if not sub_query and (group_name not in groups or not raw_args):
-            # Filter groups list based on what user typed so far
             existing_groups = list(groups.keys())
             matched_groups = [g for g in existing_groups if group_name.lower() in g.lower()] if group_name else existing_groups
 
@@ -106,7 +139,7 @@ class KeywordQueryEventListener(EventListener):
                     on_enter=SetUserQueryAction(f"{keyword} {g_name}")
                 ))
 
-            # NEW FEATURE: If what they typed doesn't exactly match an existing group, show "Add New Group"
+            # New Group UI Button Builder
             if group_name and group_name not in groups:
                 items.append(ExtensionResultItem(
                     icon=DEFAULT_ICON,
@@ -117,63 +150,79 @@ class KeywordQueryEventListener(EventListener):
 
             return RenderResultListAction(items)
 
-        # 2. Group Exists: View, Fuzzy Search, or Apply Actions inside it
+        # Collection Sub-State Interface: User navigates inside an active group folder
         if group_name in groups:
+            saved_entries = groups[group_name]
             
-            # Scenario A: Inline Edit/Delete action using "->"
+            # Legacy parser sanitization loop to safely parse plain string databases
+            normalized_entries = []
+            for entry in saved_entries:
+                if isinstance(entry, dict):
+                    normalized_entries.append(entry)
+                else:
+                    normalized_entries.append({"alias": entry, "command": entry})
+
+            # Check Condition A: User triggers inline Edit/Delete using arrow operator
             if "->" in sub_query:
                 old_part, new_part = [x.strip() for x in sub_query.split("->", 1)]
-                matches = difflib.get_close_matches(old_part, groups[group_name], n=1, cutoff=0.3)
+                aliases = [e["alias"] for e in normalized_entries]
+                matches = difflib.get_close_matches(old_part, aliases, n=1, cutoff=0.3)
+                
                 if matches:
-                    target_cmd = matches[0]
+                    target_alias = matches[0]
                     if not new_part:
                         items.append(ExtensionResultItem(
                             icon=DEFAULT_ICON,
-                            name=f"🗑️ Delete command: '{target_cmd}'",
-                            description="Press Enter to completely remove this command",
-                            on_enter=SetUserQueryAction(f"{keyword} commit_action {group_name} delete {target_cmd}")
+                            name=f"🗑️ Delete Item: '{target_alias}'",
+                            description="Press Enter to completely remove this entry",
+                            on_enter=SetUserQueryAction(f"{keyword} commit_action {group_name} delete {target_alias}")
                         ))
                     else:
                         items.append(ExtensionResultItem(
                             icon=DEFAULT_ICON,
-                            name=f"📝 Update to: '{new_part}'",
-                            description=f"Modifying original command: '{target_cmd}'",
-                            on_enter=SetUserQueryAction(f"{keyword} commit_action {group_name} update {target_cmd} -> {new_part}")
+                            name=f"📝 Update item configuration sequence...",
+                            description=f"Target: '{target_alias}' -> Modifying to rules: {new_part}",
+                            on_enter=SetUserQueryAction(f"{keyword} commit_action {group_name} update {target_alias} -> {new_part}")
                         ))
                     return RenderResultListAction(items)
 
-            # Scenario B: Ordinary browsing / Fuzzy searching within the group
-            saved_commands = groups[group_name]
-            
+            # Check Condition B: Normal layout rendering / Interactive Fuzzy Search Matching
             if sub_query:
-                matched_cmds = difflib.get_close_matches(sub_query, saved_commands, n=10, cutoff=0.1)
-                if not matched_cmds:
-                    matched_cmds = [c for c in saved_commands if sub_query.lower() in c.lower()]
+                alias_map = {e["alias"]: e for e in normalized_entries}
+                matched_aliases = difflib.get_close_matches(sub_query, list(alias_map.keys()), n=10, cutoff=0.1)
+                if not matched_aliases:
+                    matched_aliases = [a for a in alias_map.keys() if sub_query.lower() in a.lower()]
+                matched_entries = [alias_map[a] for a in matched_aliases]
             else:
-                matched_cmds = saved_commands
+                matched_entries = normalized_entries
 
-            for cmd in matched_cmds:
+            for entry in matched_entries:
                 items.append(ExtensionResultItem(
                     icon=DEFAULT_ICON,
-                    name=cmd,
-                    description="👉 Click to drop this command into your search bar",
-                    on_enter=SetUserQueryAction(cmd)
+                    name=entry["alias"],
+                    description=f"👉 Click to deploy: {entry['command']}",
+                    on_enter=SetUserQueryAction(entry["command"])
                 ))
 
-            # Scenario C: If user types a brand new item phrase, offer to append it
-            if sub_query and sub_query not in saved_commands and "->" not in sub_query:
-                items.append(ExtensionResultItem(
-                    icon=DEFAULT_ICON,
-                    name=f"➕ Add to group: '{sub_query}'",
-                    description=f"Append this entry into collection '{group_name}'",
-                    on_enter=SetUserQueryAction(f"{keyword} commit_action {group_name} add {sub_query}")
-                ))
+            # Check Condition C: Add structural item button generation hook
+            if sub_query and "->" not in sub_query:
+                current_aliases = [e["alias"] for e in normalized_entries]
+                test_alias = [x.strip() for x in sub_query.split(":", 1)][0]
+                
+                if test_alias not in current_aliases:
+                    has_colon = ":" in sub_query
+                    items.append(ExtensionResultItem(
+                        icon=DEFAULT_ICON,
+                        name=f"➕ Add item: '{test_alias}'",
+                        description="Optional Syntax: 'Alias : Command' to map cleaner display labels." if not has_colon else f"Will store script payload: {sub_query.split(':', 1)[1].strip()}",
+                        on_enter=SetUserQueryAction(f"{keyword} commit_action {group_name} add {sub_query}")
+                    ))
 
             return RenderResultListAction(items)
 
-        return RenderResultListAction([ExtensionResultItem(icon=DEFAULT_ICON, name="Unknown state", on_enter=DoNothingAction())])
+        return RenderResultListAction([ExtensionResultItem(icon=DEFAULT_ICON, name="Unknown State Error", on_enter=DoNothingAction())])
 
 
 if __name__ == '__main__':
-    KeywordQueryEventListener.__module__ = '__main__' # Safeguard for Ulauncher environment imports
+    KeywordQueryEventListener.__module__ = '__main__' 
     InteractiveGroupExtension().run()
