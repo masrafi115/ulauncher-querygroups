@@ -1,18 +1,18 @@
 {
   "required_api_version": "^2.0.0",
-  "name": "Demo",
-  "description": "Demo extension",
-  "developer_name": "Aleksandr Gornostal",
+  "name": "QueryGroups",
+  "description": "QueryGroups",
+  "developer_name": "Abdur Rahman Rafi",
   "icon": "images/icon.png",
   "options": {
     "query_debounce": 0.05
   },
   "preferences": [
     {
-      "id": "demo_kw",
+      "id": "query_kw",
       "type": "keyword",
-      "name": "Demo",
-      "default_value": "dm"
+      "name": "QueryGroups",
+      "default_value": "gp"
     },
     {
       "id": "item_name",
