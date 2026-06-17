@@ -53,16 +53,16 @@ class KeywordQueryEventListener(EventListener):
         # -----------------------------------------------------------------
         if raw_args.startswith("commit_action "):
             payload = raw_args[14:].strip()
-            # Expecting: group_name action_type data...
             bits = payload.split(maxsplit=2)
             if len(bits) >= 2:
                 target_group, action_type = bits[0], bits[1]
                 remaining_data = bits[2] if len(bits) == 3 else ""
                 
-                if action_type == "add" and remaining_data:
+                if action_type == "add":
                     if target_group not in groups:
                         groups[target_group] = []
-                    if remaining_data not in groups[target_group]:
+                    # Only add if data is provided; allows creating empty groups too
+                    if remaining_data and remaining_data not in groups[target_group]:
                         groups[target_group].append(remaining_data)
                     save_groups(groups)
                 
@@ -72,7 +72,6 @@ class KeywordQueryEventListener(EventListener):
                     save_groups(groups)
 
                 elif action_type == "update":
-                    # Expecting old_cmd -> new_cmd split
                     if "->" in remaining_data:
                         old_cmd, new_cmd = [x.strip() for x in remaining_data.split("->", 1)]
                         if target_group in groups and old_cmd in groups[target_group]:
@@ -84,55 +83,57 @@ class KeywordQueryEventListener(EventListener):
                     ExtensionResultItem(
                         icon=DEFAULT_ICON,
                         name="✨ Operation Complete!",
-                        description="Press Enter to return to your collection.",
+                        description="Press Enter to open your collection.",
                         on_enter=SetUserQueryAction(f"{keyword} {target_group}")
                     )
                 ])
 
-        # 1. Base State: Typing just "gp" lists collections
-        if not raw_args:
-            if not groups:
-                return RenderResultListAction([
-                    ExtensionResultItem(
-                        icon=DEFAULT_ICON,
-                        name="No collections found",
-                        description="Add a command: 'gp group1 echo \"Demo\"'",
-                        on_enter=DoNothingAction()
-                    )
-                ])
-            for group_name in groups.keys():
-                items.append(ExtensionResultItem(
-                    icon=DEFAULT_ICON,
-                    name=f"📁 Collection: {group_name}",
-                    description=f"Contains {len(groups[group_name])} items.",
-                    on_enter=SetUserQueryAction(f"{keyword} {group_name}")
-                ))
-            return RenderResultListAction(items)
-
-        # Parse main group block
+        # 1. Base State: Typing just "gp" or filtering existing groups
         bits = raw_args.split(maxsplit=1)
-        group_name = bits[0]
+        group_name = bits[0] if raw_args else ""
         sub_query = bits[1].strip() if len(bits) > 1 else ""
 
-        # 2. Group Exists: View, Fuzzy Search, or Apply Actions
+        if not sub_query and (group_name not in groups or not raw_args):
+            # Filter groups list based on what user typed so far
+            existing_groups = list(groups.keys())
+            matched_groups = [g for g in existing_groups if group_name.lower() in g.lower()] if group_name else existing_groups
+
+            for g_name in matched_groups:
+                items.append(ExtensionResultItem(
+                    icon=DEFAULT_ICON,
+                    name=f"📁 Collection: {g_name}",
+                    description=f"Contains {len(groups[g_name])} items.",
+                    on_enter=SetUserQueryAction(f"{keyword} {g_name}")
+                ))
+
+            # NEW FEATURE: If what they typed doesn't exactly match an existing group, show "Add New Group"
+            if group_name and group_name not in groups:
+                items.append(ExtensionResultItem(
+                    icon=DEFAULT_ICON,
+                    name=f"✨ Create New Collection: '{group_name}'",
+                    description=f"Press Enter to initialize a new group named '{group_name}'",
+                    on_enter=SetUserQueryAction(f"{keyword} commit_action {group_name} add")
+                ))
+
+            return RenderResultListAction(items)
+
+        # 2. Group Exists: View, Fuzzy Search, or Apply Actions inside it
         if group_name in groups:
             
-            # Scenario A: User is trying an inline Edit/Delete action using "->"
+            # Scenario A: Inline Edit/Delete action using "->"
             if "->" in sub_query:
                 old_part, new_part = [x.strip() for x in sub_query.split("->", 1)]
-                
-                # Close match matching to see what command the user wants to target
                 matches = difflib.get_close_matches(old_part, groups[group_name], n=1, cutoff=0.3)
                 if matches:
                     target_cmd = matches[0]
-                    if not new_part: # Leaving the right side empty implies delete
+                    if not new_part:
                         items.append(ExtensionResultItem(
                             icon=DEFAULT_ICON,
                             name=f"🗑️ Delete command: '{target_cmd}'",
                             description="Press Enter to completely remove this command",
                             on_enter=SetUserQueryAction(f"{keyword} commit_action {group_name} delete {target_cmd}")
                         ))
-                    else: # Having a right side implies an update mutation
+                    else:
                         items.append(ExtensionResultItem(
                             icon=DEFAULT_ICON,
                             name=f"📝 Update to: '{new_part}'",
@@ -145,9 +146,7 @@ class KeywordQueryEventListener(EventListener):
             saved_commands = groups[group_name]
             
             if sub_query:
-                # Use standard close matching scores to dynamically sort items by relevance
                 matched_cmds = difflib.get_close_matches(sub_query, saved_commands, n=10, cutoff=0.1)
-                # If fuzzy matching yields nothing, fallback to simple string containment rules
                 if not matched_cmds:
                     matched_cmds = [c for c in saved_commands if sub_query.lower() in c.lower()]
             else:
@@ -161,30 +160,20 @@ class KeywordQueryEventListener(EventListener):
                     on_enter=SetUserQueryAction(cmd)
                 ))
 
-            # Scenario C: If the user types a brand new phrase that doesn't match any old item,
-            # offer to save it right there as a new entry.
+            # Scenario C: If user types a brand new item phrase, offer to append it
             if sub_query and sub_query not in saved_commands and "->" not in sub_query:
                 items.append(ExtensionResultItem(
                     icon=DEFAULT_ICON,
-                    name=f"➕ Save brand new item: '{sub_query}'",
+                    name=f"➕ Add to group: '{sub_query}'",
                     description=f"Append this entry into collection '{group_name}'",
                     on_enter=SetUserQueryAction(f"{keyword} commit_action {group_name} add {sub_query}")
                 ))
 
             return RenderResultListAction(items)
 
-        # 3. Group doesn't exist yet: Bootstrap initial collection
-        if sub_query:
-            items.append(ExtensionResultItem(
-                icon=DEFAULT_ICON,
-                name=f"📂 Create Collection '{group_name}'",
-                description=f"Will instantiate collection and add: {sub_query}",
-                on_enter=SetUserQueryAction(f"{keyword} commit_action {group_name} add {sub_query}")
-            ))
-            return RenderResultListAction(items)
-
         return RenderResultListAction([ExtensionResultItem(icon=DEFAULT_ICON, name="Unknown state", on_enter=DoNothingAction())])
 
 
 if __name__ == '__main__':
+    KeywordQueryEventListener.__module__ = '__main__' # Safeguard for Ulauncher environment imports
     InteractiveGroupExtension().run()
