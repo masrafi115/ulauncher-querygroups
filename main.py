@@ -12,7 +12,6 @@ from ulauncher.api.shared.action.DoNothingAction import DoNothingAction
 
 logger = logging.getLogger(__name__)
 
-# Storage file for collections
 GROUPS_FILE = Path("~/.config/ulauncher/collections_storage.json").expanduser()
 DEFAULT_ICON = "images/icon.png" 
 
@@ -46,14 +45,64 @@ class KeywordQueryEventListener(EventListener):
         groups = load_groups()
         items = []
 
-        # 1. Base State: Typing just "gp" lists all collections
-        if not argument.strip():
+        # Clean up any trailing/leading spaces to avoid parsing errors
+        raw_args = argument.strip()
+
+        # -----------------------------------------------------------------
+        # CRITICAL FIX: Intercept Internal Command Executions Early
+        # -----------------------------------------------------------------
+        if raw_args.startswith("commit_cmd "):
+            # Strip "commit_cmd " out to get the payload
+            payload = raw_args[11:].strip()
+            bits = payload.split(maxsplit=1)
+            if len(bits) == 2:
+                target_group, target_cmd = bits[0], bits[1]
+                if target_group not in groups:
+                    groups[target_group] = []
+                if target_cmd not in groups[target_group]:
+                    groups[target_group].append(target_cmd)
+                    save_groups(groups)
+                
+                # Success screen! Send user directly back to the clean group view
+                return RenderResultListAction([
+                    ExtensionResultItem(
+                        icon=DEFAULT_ICON,
+                        name="✅ Saved Successfully!",
+                        description=f"Added to '{target_group}'. Press Enter to return.",
+                        on_enter=SetUserQueryAction(f"{keyword} {target_group}")
+                    )
+                ])
+
+        if raw_args.startswith("remove_cmd "):
+            payload = raw_args[11:].strip()
+            bits = payload.split(maxsplit=1)
+            if len(bits) == 2:
+                target_group, target_cmd = bits[0], bits[1]
+                if target_group in groups and target_cmd in groups[target_group]:
+                    groups[target_group].remove(target_cmd)
+                    save_groups(groups)
+                
+                return RenderResultListAction([
+                    ExtensionResultItem(
+                        icon=DEFAULT_ICON,
+                        name="🗑️ Command Removed!",
+                        description="Press Enter to return.",
+                        on_enter=SetUserQueryAction(f"{keyword} {target_group}")
+                    )
+                ])
+
+        # -----------------------------------------------------------------
+        # Standard Parsing Navigation
+        # -----------------------------------------------------------------
+        
+        # 1. Base State: Only typing "gp"
+        if not raw_args:
             if not groups:
                 return RenderResultListAction([
                     ExtensionResultItem(
                         icon=DEFAULT_ICON,
                         name="No collections found",
-                        description="Add a command: 'gp group1 echo \"Hello\"'",
+                        description="Add a command: 'gp group1 echo \"Demo\"'",
                         on_enter=DoNothingAction()
                     )
                 ])
@@ -62,66 +111,47 @@ class KeywordQueryEventListener(EventListener):
                 items.append(ExtensionResultItem(
                     icon=DEFAULT_ICON,
                     name=f"📁 Collection: {group_name}",
-                    description=f"Contains {len(groups[group_name])} saved items. Click to expand.",
-                    # Fills query with 'gp group1' to expand this group
+                    description=f"Contains {len(groups[group_name])} items. Click to open.",
                     on_enter=SetUserQueryAction(f"{keyword} {group_name}")
                 ))
             return RenderResultListAction(items)
 
-        # Parse out arguments
-        bits = argument.strip().split(maxsplit=1)
+        # Split arguments cleanly into target group and text payload
+        bits = raw_args.split(maxsplit=1)
         group_name = bits[0]
         command_payload = bits[1] if len(bits) > 1 else None
 
-        # 2. Expanded State: "gp group1" lists all commands under it
+        # 2. Expanded State: "gp group1" (Viewing existing group data)
         if group_name in groups and not command_payload:
             for cmd in groups[group_name]:
+                # Action: Replace input query box entirely with the command to run it
                 items.append(ExtensionResultItem(
                     icon=DEFAULT_ICON,
                     name=cmd,
-                    description="Click to copy this command into the main search bar",
-                    # KEY FIX: This replaces the entire Ulauncher input box with your command!
+                    description="👉 Click to copy this command into main search bar",
                     on_enter=SetUserQueryAction(cmd)
                 ))
                 
-                # Management option right below the item to delete it if needed
+                # Management Row: Remove it cleanly
                 items.append(ExtensionResultItem(
                     icon=DEFAULT_ICON,
                     name=f"❌ Remove: {cmd}",
-                    description="Delete this command string from collection",
+                    description="Delete this specific command line string",
                     on_enter=SetUserQueryAction(f"{keyword} remove_cmd {group_name} {cmd}")
                 ))
             return RenderResultListAction(items)
 
-        # 3. Action Handler: Removing an item
-        if group_name == "remove_cmd":
-            sub_bits = bits[1].split(maxsplit=1)
-            target_group, target_cmd = sub_bits[0], sub_bits[1]
-            if target_group in groups and target_cmd in groups[target_group]:
-                groups[target_group].remove(target_cmd)
-                save_groups(groups)
-            return RenderResultListAction([ExtensionResultItem(icon=DEFAULT_ICON, name="Command Removed!", on_enter=SetUserQueryAction(f"{keyword} {target_group}"))])
-
-        # 4. Adding State: "gp group1 echo 'test'"
+        # 3. Adding/Creation State: "gp group1 echo 'Demo'"
         if command_payload:
             is_new = group_name not in groups
             items.append(ExtensionResultItem(
                 icon=DEFAULT_ICON,
                 name=f"➕ {'Create & ' if is_new else ''}Save to '{group_name}'",
                 description=f"Will save: {command_payload}",
+                # Passes 'commit_cmd' safely to be caught at the top loop next frame
                 on_enter=SetUserQueryAction(f"{keyword} commit_cmd {group_name} {command_payload}")
             ))
             return RenderResultListAction(items)
-
-        if group_name == "commit_cmd":
-            sub_bits = bits[1].split(maxsplit=1)
-            target_group, target_cmd = sub_bits[0], sub_bits[1]
-            if target_group not in groups:
-                groups[target_group] = []
-            if target_cmd not in groups[target_group]:
-                groups[target_group].append(target_cmd)
-                save_groups(groups)
-            return RenderResultListAction([ExtensionResultItem(icon=DEFAULT_ICON, name="Saved!", on_enter=SetUserQueryAction(f"{keyword} {target_group}"))])
 
         return RenderResultListAction([ExtensionResultItem(icon=DEFAULT_ICON, name="Unknown collection state", on_enter=DoNothingAction())])
 
